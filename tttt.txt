@@ -1,0 +1,103 @@
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return render_template("dashboard.html")
+
+    
+@app.route("/upload", methods=["POST"])
+@login_required
+def upload_document():
+    if "document" not in request.files:
+        flash("Please choose a file first.", "error")
+        return redirect(url_for("dashboard"))
+
+    uploaded_file = request.files["document"]
+
+    if not uploaded_file.filename:
+        flash("Please choose a file first.", "error")
+        return redirect(url_for("dashboard"))
+
+    original_filename = secure_filename(uploaded_file.filename)
+
+    if not original_filename:
+        flash("The filename is invalid.", "error")
+        return redirect(url_for("dashboard"))
+
+    file_type = Path(original_filename).suffix.lower().lstrip(".")
+
+    if file_type not in ALLOWED_EXTENSIONS:
+        flash("That file type is not supported.", "error")
+        return redirect(url_for("dashboard"))
+
+    # Generate a unique storage name instead of trusting the uploaded name.
+    stored_filename = f"{uuid.uuid4().hex}.{file_type}"
+    file_path = os.path.join(UPLOAD_FOLDER, stored_filename)
+
+    connection = None
+    cursor = None
+    document_id = None
+
+    try:
+        uploaded_file.save(file_path)
+
+        # Extract text to verify that the document is readable.
+        extracted_text = extract_text(file_path, file_type)
+
+        connection = get_db_connection()
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO documents
+                (user_id, original_filename, stored_filename, file_type, status)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                current_user.id,
+                original_filename,
+                stored_filename,
+                file_type,
+                "uploaded",
+            ),
+        )
+
+        document_id = cursor.lastrowid
+        connection.commit()
+
+        return render_template(
+            "preview.html",
+            filename=original_filename,
+            document_id=document_id,
+            extracted_text=extracted_text,
+        )
+
+    except ValueError as error:
+        if connection is not None:
+            connection.rollback()
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        flash(str(error), "error")
+        return redirect(url_for("dashboard"))
+
+    except Exception:
+        if connection is not None:
+            connection.rollback()
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        app.logger.exception("Document upload or extraction failed.")
+        flash(
+            "The file could not be processed. Please try another file.",
+            "error",
+        )
+        return redirect(url_for("dashboard"))
+
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+        if connection is not None and connection.is_connected():
+            connection.close()
